@@ -1,0 +1,285 @@
+Predicting Activity Quality From Activity Monitors
+===============================
+
+Introduction
+-------
+Using devices such as *Jawbone Up*, *Nike FuelBand*, and *Fitbit* it is now possible to collect a large amount of data about personal activity relatively inexpensively.
+
+One thing that people regularly do is quantify *how much* of a particular activity they do, but they rarely quantify *how well* they do it. In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbbell of 6 participants who were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+Utilizing the activity monitor device data, a machine learning model is developed using a training set with class labels representing the five ways of performing the barbell lifts. 
+
+## Input Data 
+
+We will use a data set consisting of various movement measurements including acceleration components of the arms and pitch and roll orientations of the dumbbell.
+
+[Train Data.](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+
+[Test Data.](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+More information about the data set is available from Human Activity Recognition Initiative [website](http://groupware.les.inf.puc-rio.br/har). 
+
+## Data Pre-Processing 
+
+We start by loading several packages into the workspace. Importantly, to build our machine learning model, we will utilize the *caret* package which provides a streamlined interface into a variety of machine learning methods.
+
+Also note the use of the *doMC* library and *registerDoMC* function. This is needed to utilize multiple cores to speed-up calculations. 
+
+```r
+suppressMessages(library(caret))
+suppressMessages(library(ggplot2))
+suppressMessages(library(doMC))
+registerDoMC(cores = 4)
+```
+
+Next, we load the training data: 
+
+```r
+pmlData <- read.csv("./train/pml-training.csv", stringsAsFactors = FALSE)
+dim(pmlData)
+```
+
+```
+## [1] 19622   160
+```
+
+Upon inspection of **pmlData** date frame using function **str(pmlData)**, one can observe that the measurements data spans columns 8 through 160. Therefore, we remove the first 7 columns from our data frame.
+
+
+```r
+pmlData <- pmlData[, -c(1:7)] 
+```
+
+Next, we create data partitioning by splitting the data into training and testing data sets.
+
+```r
+set.seed(1)
+inTrain <- createDataPartition(pmlData$classe, p = 3/4)[[1]]
+trainData <- pmlData[inTrain,]
+testData <- pmlData[-inTrain,]
+dim(trainData); dim(testData)
+```
+
+```
+## [1] 14718   153
+```
+
+```
+## [1] 4904  153
+```
+In what follows, we use **trainData** for training and **testData** for cross-validation.
+
+Remove **classe** column from data and convert it to a factor variable. 
+
+
+```r
+trainclass <- factor(trainData$classe)
+trainData <- trainData[, colnames(trainData) != "classe"]
+testclass <- factor(testData$classe)
+testData <- testData[, colnames(testData) != "classe"]
+```
+
+
+```r
+prop.table(table(trainclass)); prop.table(table(testclass))
+```
+
+```
+## trainclass
+##      A      B      C      D      E 
+## 0.2843 0.1935 0.1744 0.1639 0.1839
+```
+
+```
+## testclass
+##      A      B      C      D      E 
+## 0.2845 0.1935 0.1743 0.1639 0.1837
+```
+
+The data contains numeric predictor variables saved as characters. In order to apply **train** function, we need to convert these fields to numeric types. This is done as outlined below.    
+
+
+```r
+options(warn = -1)
+charcols <- sapply(trainData, is.character)
+## convert character columns to numeric 
+tmp.train <- apply(trainData[,charcols], 2, function(x) as.numeric(x))   
+tmp.train <- as.data.frame(tmp.train)
+tmp.test <- apply(testData[,charcols], 2, function(x) as.numeric(x))
+tmp.test <- as.data.frame(tmp.test)
+## update data frames 
+trainData[,charcols] <- tmp.train
+testData[,charcols] <- tmp.test 
+```
+
+We remove the predictors which have $80\%$ and more missing values
+
+```r
+obs <- nrow(trainData)
+nacols <- apply(trainData, 2, function(x) {sum(is.na(x))/obs >= 0.8}) 
+trainData <- trainData[,!nacols]
+testData <- testData[,!nacols]
+```
+
+This leaves us with the following number of features in both data frames. We also verify that there are no missing values among remaining features.
+
+```r
+ncol(trainData); ncol(testData);
+```
+
+```
+## [1] 52
+```
+
+```
+## [1] 52
+```
+
+```r
+sum(is.na(trainData)); sum(is.na(testData))
+```
+
+```
+## [1] 0
+```
+
+```
+## [1] 0
+```
+
+We use *preProcess* function from *caret* to re-scale the data. 
+
+
+```r
+preProc <- preProcess(trainData, method = c("center", "scale"))
+trainData <- predict(preProc, trainData)
+testData <- predict(preProc, testData)
+```
+
+### Principal Component Analysis
+
+We choose to apply PCA to further optimize the data. In particular, PCA reduces the number of covariates to 25 which still capture $95\%$ of the variance in our data set. 
+
+```r
+datPCA <- prcomp(trainData)
+## 25 princial components capture 95% of variance in the data 
+preProcPCA <- preProcess(trainData, method = "pca") 
+trainPC <- predict(preProcPCA, trainData)
+testPC <- predict(preProcPCA, testData)
+```
+
+## Model Training
+
+We examine Random Forest with different re-sampling methods, and compare it to Support Vector Machine with radial basis.   
+We specify the number of randomly-selected predictors at each split by passing the corresponding values to *tuneGrid*.
+
+
+```r
+set.seed(2)
+## choose cross-validation with 4 folds as the resampling method
+tc <- trainControl(method = "cv", number = 4)
+modFit_v1 <- train(trainPC, trainclass, method = "rf", trControl = tc,
+                allowParallel = TRUE, tuneGrid = data.frame(.mtry = c(2,4,6)))
+```
+
+
+```r
+set.seed(3)
+tc <- trainControl("oob", number=10, repeats=10, classProbs=TRUE, savePred=TRUE)
+modFit_v2 <- train(trainPC, trainclass, method = "rf", trControl = tc, 
+                   allowParallel = TRUE, tuneGrid = data.frame(.mtry = c(2,4,6)))
+```
+
+
+```r
+tc <- trainControl(method = "cv", number = 4)
+modFit_v3 <- train(trainPC, trainclass, method = "svmRadial", trControl = tc)
+```
+
+
+```r
+df <- data.frame(Model=c("Random Forest (cv)", "Random Forest (oob)", "SVM (radial)"),
+                 Accuracy = c(round(max(head(modFit_v1$results)$Accuracy), 3),
+                              round(max(head(modFit_v2$results)$Accuracy), 3),
+                              round(max(head(modFit_v3$results)$Accuracy), 3)))
+kable(df)
+```
+
+```
+## 
+## 
+## |Model               | Accuracy|
+## |:-------------------|--------:|
+## |Random Forest (cv)  |    0.969|
+## |Random Forest (oob) |    0.976|
+## |SVM (radial)        |    0.897|
+```
+From the table, we can see that Random Forest with out-of-bag re-sampling has the highest accuracy. The corresponding in-sample error is approximately $2.5\%$. 
+
+## Cross-Validation and Out-of-Sample Error 
+
+Now we can apply the model to our validation set and calculate the expected out-of-sample error. 
+
+
+```r
+pred <- predict(modFit_v2, testPC)
+conf.matrix <- confusionMatrix(testclass, predict(modFit_v2, testPC))
+conf.matrix
+```
+
+```
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 1381    3    7    4    0
+##          B    8  930   11    0    0
+##          C    1    3  844    6    1
+##          D    1    1   31  769    2
+##          E    1    1    4   11  884
+## 
+## Overall Statistics
+##                                         
+##                Accuracy : 0.98          
+##                  95% CI : (0.976, 0.984)
+##     No Information Rate : 0.284         
+##     P-Value [Acc > NIR] : < 2e-16       
+##                                         
+##                   Kappa : 0.975         
+##  Mcnemar's Test P-Value : 1.1e-05       
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity             0.992    0.991    0.941    0.973    0.997
+## Specificity             0.996    0.995    0.997    0.991    0.996
+## Pos Pred Value          0.990    0.980    0.987    0.956    0.981
+## Neg Pred Value          0.997    0.998    0.987    0.995    0.999
+## Prevalence              0.284    0.191    0.183    0.161    0.181
+## Detection Rate          0.282    0.190    0.172    0.157    0.180
+## Detection Prevalence    0.284    0.194    0.174    0.164    0.184
+## Balanced Accuracy       0.994    0.993    0.969    0.982    0.996
+```
+Thus, the expected out-of-sample error is $\approx 2 \%$. 
+
+The following is an interesting observation of 5 clusters 
+if we plot the projection of the data to the first two principal components. We can also clearly see a relatively small number of misclassified samples in the plot.  
+
+
+```r
+testPC$predRight <- pred == testclass
+qplot(testPC[,1], testPC[,2], colour = predRight, data = testPC, main = "Test Data Predictors")
+```
+
+![plot of chunk unnamed-chunk-17](figure/unnamed-chunk-17.png) 
+
+We conclude by demonstrating how error rate changes with the number of trees in the Random Forest model.  
+
+
+```r
+model <- modFit_v2$finalModel
+plot(model, main = "Error Rate Over Trees", log = "y")
+legend("topright", legend=colnames(model$err.rate), col = c(1:6), pch=19)
+```
+
+![plot of chunk unnamed-chunk-18](figure/unnamed-chunk-18.png) 
